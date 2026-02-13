@@ -310,24 +310,145 @@ def score_proposal(pricing: dict, scope: dict) -> dict:
     }
 
 
+RATING_LABELS = {
+    "good": "Below benchmark",
+    "fair": "Near benchmark",
+    "high": "Above benchmark",
+    "unpriced": "No pricing found",
+    "no_benchmark": "No benchmark available",
+}
+
+
+def _generate_suggestions(scores: dict, scope: dict) -> list[str]:
+    """Generate actionable suggestions based on scores and scope."""
+    suggestions = []
+    product_scores = scores.get("products", {})
+
+    for product, info in product_scores.items():
+        rating = info["rating"]
+        if rating == "high":
+            ratio = info["ratio"]
+            suggestions.append(
+                f"**{product}** is priced {ratio}x the benchmark "
+                f"(${info['cost']:,.0f} vs ${info['benchmark']:,.0f}). "
+                f"Negotiate or request itemized justification."
+            )
+        elif rating == "unpriced":
+            suggestions.append(
+                f"**{product}** is referenced in scope but has no "
+                f"associated pricing. Request a detailed cost breakdown."
+            )
+
+    detected = scope.get("products", {})
+    for product, features in detected.items():
+        if product in BENCHMARKS and product not in product_scores:
+            suggestions.append(
+                f"**{product}** features detected ({', '.join(features[:3])}) "
+                f"but not scored. Confirm whether it's included in the proposal."
+            )
+
+    if not scope.get("sections", {}).get("out_of_scope"):
+        suggestions.append(
+            "No out-of-scope section detected. Request explicit exclusions "
+            "to avoid scope creep."
+        )
+
+    if not scope.get("user_count"):
+        suggestions.append(
+            "No user/license count found. Clarify the number of seats "
+            "to validate per-user pricing."
+        )
+
+    if not suggestions:
+        suggestions.append("Proposal looks well-structured. No major concerns.")
+
+    return suggestions
+
+
 def generate_report(pricing: dict, scope: dict, scores: dict) -> str:
     """Generate a Markdown report with analysis and suggestions."""
-    lines = [
-        "# Proposal Analysis Report",
-        "",
-        "## Pricing Summary",
-        "<!-- TODO: populate pricing details -->",
-        "",
-        "## Scope & Salesforce Features",
-        "<!-- TODO: populate scope details -->",
-        "",
-        "## Benchmark Scoring",
-        "<!-- TODO: populate scores -->",
-        "",
-        "## Suggestions",
-        "<!-- TODO: populate suggestions -->",
-        "",
-    ]
+    lines = ["# Proposal Analysis Report", ""]
+
+    # --- Pricing Summary ---
+    lines.append("## Pricing Summary")
+    lines.append("")
+    total = pricing.get("total", 0)
+    lines.append(f"**Total proposed cost:** ${total:,.2f}")
+    lines.append("")
+    line_items = pricing.get("line_items", [])
+    if line_items:
+        lines.append("| Label | Amount | Period | Context |")
+        lines.append("|-------|--------|--------|---------|")
+        for item in line_items:
+            period = item["period"] or "—"
+            context = item["context"][:60] + "..." if len(item["context"]) > 60 else item["context"]
+            lines.append(
+                f"| {item['label']} | ${item['amount']:,.2f} | {period} | {context} |"
+            )
+        lines.append("")
+    else:
+        lines.append("_No line items extracted._")
+        lines.append("")
+
+    # --- Scope & Features ---
+    lines.append("## Scope & Salesforce Features")
+    lines.append("")
+    products = scope.get("products", {})
+    if products:
+        for product, features in products.items():
+            feature_str = ", ".join(features) if features else "_product name only_"
+            lines.append(f"- **{product}**: {feature_str}")
+        lines.append("")
+    else:
+        lines.append("_No Salesforce products detected._")
+        lines.append("")
+
+    user_count = scope.get("user_count")
+    if user_count:
+        lines.append(f"**Estimated users/licenses:** {user_count}")
+        lines.append("")
+
+    sections = scope.get("sections", {})
+    if sections.get("in_scope"):
+        lines.append("### In Scope")
+        lines.append("")
+        lines.append(sections["in_scope"])
+        lines.append("")
+    if sections.get("out_of_scope"):
+        lines.append("### Out of Scope")
+        lines.append("")
+        lines.append(sections["out_of_scope"])
+        lines.append("")
+
+    # --- Benchmark Scoring ---
+    lines.append("## Benchmark Scoring")
+    lines.append("")
+    overall = scores.get("overall_score", 0)
+    lines.append(f"**Overall score:** {overall}/100")
+    lines.append("")
+    product_scores = scores.get("products", {})
+    if product_scores:
+        lines.append("| Product | Cost | Benchmark | Ratio | Rating |")
+        lines.append("|---------|------|-----------|-------|--------|")
+        for product, info in product_scores.items():
+            cost = f"${info['cost']:,.0f}" if info["cost"] else "—"
+            benchmark = f"${info['benchmark']:,.0f}" if info["benchmark"] else "—"
+            ratio = f"{info['ratio']}x" if info["ratio"] is not None else "—"
+            rating = RATING_LABELS.get(info["rating"], info["rating"])
+            lines.append(f"| {product} | {cost} | {benchmark} | {ratio} | {rating} |")
+        lines.append("")
+    else:
+        lines.append("_No products scored._")
+        lines.append("")
+
+    # --- Suggestions ---
+    lines.append("## Suggestions")
+    lines.append("")
+    suggestions = _generate_suggestions(scores, scope)
+    for s in suggestions:
+        lines.append(f"- {s}")
+    lines.append("")
+
     return "\n".join(lines)
 
 
