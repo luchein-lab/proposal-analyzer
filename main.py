@@ -128,10 +128,114 @@ def parse_pricing(text: str, tables: list[pd.DataFrame]) -> dict:
     }
 
 
+SALESFORCE_PRODUCTS = {
+    "Marketing Cloud": [
+        "journey builder", "email studio", "advertising studio",
+        "mobile studio", "social studio", "audience builder",
+        "marketing cloud connect", "marketing cloud intelligence",
+        "marketing cloud personalization",
+    ],
+    "Sales Cloud": [
+        "lead management", "opportunity management", "forecasting",
+        "pipeline management", "cpq", "revenue cloud", "sales engagement",
+        "territory management", "einstein activity capture",
+    ],
+    "Service Cloud": [
+        "case management", "knowledge base", "omni-channel",
+        "field service", "visual remote assistant", "service console",
+        "chatbot", "live agent", "einstein bots",
+    ],
+    "Commerce Cloud": [
+        "b2c commerce", "b2b commerce", "order management",
+        "commerce storefront", "headless commerce", "payments",
+    ],
+    "Data Cloud": [
+        "data cloud", "cdp", "customer data platform", "data streams",
+        "identity resolution", "calculated insights", "segmentation",
+        "data graphs",
+    ],
+    "Experience Cloud": [
+        "experience cloud", "community cloud", "customer portal",
+        "partner portal", "experience builder",
+    ],
+    "Tableau": [
+        "tableau", "crm analytics", "analytics cloud",
+        "einstein analytics", "dashboard", "reporting",
+    ],
+    "MuleSoft": [
+        "mulesoft", "anypoint", "api management", "integration",
+    ],
+    "Platform": [
+        "lightning", "apex", "visualforce", "flow", "process builder",
+        "custom objects", "app builder", "platform events",
+        "shield", "event monitoring",
+    ],
+}
+
+SCOPE_SECTION_PATTERNS = [
+    re.compile(r"(?i)(?:scope\s+of\s+work|project\s+scope|deliverables|phases?)\s*[:\n]"),
+    re.compile(r"(?i)(?:out\s+of\s+scope|exclusions)\s*[:\n]"),
+]
+
+
+def _detect_products(text: str) -> dict[str, list[str]]:
+    """Detect Salesforce products and specific features mentioned."""
+    lower = text.lower()
+    detected = {}
+    for product, features in SALESFORCE_PRODUCTS.items():
+        matched_features = [f for f in features if f in lower]
+        if matched_features or product.lower() in lower:
+            detected[product] = matched_features
+    return detected
+
+
+def _extract_scope_sections(text: str) -> dict[str, str]:
+    """Extract in-scope and out-of-scope sections from text."""
+    sections = {}
+    lines = text.splitlines()
+    for i, line in enumerate(lines):
+        for pattern in SCOPE_SECTION_PATTERNS:
+            if pattern.search(line):
+                key = "out_of_scope" if "out" in line.lower() or "exclusion" in line.lower() else "in_scope"
+                block = []
+                for subsequent in lines[i + 1:]:
+                    # stop at the next heading-like line or empty gap
+                    if subsequent.strip() == "":
+                        if block:
+                            break
+                        continue
+                    if re.match(r"^[A-Z][A-Za-z\s]{2,30}[:\n]", subsequent):
+                        break
+                    block.append(subsequent.strip())
+                if block:
+                    sections.setdefault(key, []).extend(block)
+    return {k: "\n".join(v) for k, v in sections.items()}
+
+
+def _estimate_user_count(text: str) -> int | None:
+    """Try to find user/license count from text."""
+    patterns = [
+        re.compile(r"(\d+)\s*(?:users?|licenses?|seats?)", re.IGNORECASE),
+        re.compile(r"(?:users?|licenses?|seats?)\s*[:\-]\s*(\d+)", re.IGNORECASE),
+    ]
+    for pattern in patterns:
+        match = pattern.search(text)
+        if match:
+            return int(match.group(1))
+    return None
+
+
 def parse_scope(text: str) -> dict:
     """Parse scope and Salesforce features from extracted text."""
-    # TODO: implement scope/feature extraction logic
-    return {}
+    products = _detect_products(text)
+    sections = _extract_scope_sections(text)
+    user_count = _estimate_user_count(text)
+
+    return {
+        "products": products,
+        "sections": sections,
+        "user_count": user_count,
+    }
 
 
 BENCHMARKS = {
