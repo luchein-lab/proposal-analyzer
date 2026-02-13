@@ -1,4 +1,5 @@
 import argparse
+import re
 import sys
 from pathlib import Path
 
@@ -19,10 +20,112 @@ def extract_tables(pdf_path: str) -> list[pd.DataFrame]:
     return tabula.read_pdf(pdf_path, pages="all", multiple_tables=True)
 
 
+PRICE_PATTERN = re.compile(
+    r"\$\s?([\d,]+(?:\.\d{2})?)\s*(?:/\s*(mo|month|yr|year|user|license))?"
+)
+
+PRICING_KEYWORDS = [
+    "total", "subtotal", "annual", "monthly", "license", "subscription",
+    "implementation", "setup", "onboarding", "support", "discount",
+    "one-time", "recurring",
+]
+
+
+def _extract_prices_from_text(text: str) -> list[dict]:
+    """Find all dollar amounts in text with surrounding context."""
+    items = []
+    for line in text.splitlines():
+        for match in PRICE_PATTERN.finditer(line):
+            amount_str = match.group(1).replace(",", "")
+            amount = float(amount_str)
+            period = match.group(2) or ""
+            label = _classify_line_item(line)
+            items.append({
+                "label": label,
+                "amount": amount,
+                "period": period,
+                "context": line.strip(),
+            })
+    return items
+
+
+def _classify_line_item(line: str) -> str:
+    """Classify a pricing line item based on keyword matching."""
+    lower = line.lower()
+    for keyword in PRICING_KEYWORDS:
+        if keyword in lower:
+            return keyword
+    return "other"
+
+
+def _extract_prices_from_tables(tables: list[pd.DataFrame]) -> list[dict]:
+    """Extract pricing data from tabular structures."""
+    items = []
+    for df in tables:
+        price_cols = [
+            col for col in df.columns
+            if any(k in str(col).lower() for k in ["price", "cost", "amount", "fee", "total", "$"])
+        ]
+        label_cols = [
+            col for col in df.columns
+            if any(k in str(col).lower() for k in ["item", "description", "product", "service", "name", "component"])
+        ]
+        if not price_cols:
+            # scan all cells for dollar amounts as fallback
+            for _, row in df.iterrows():
+                for val in row:
+                    val_str = str(val)
+                    for match in PRICE_PATTERN.finditer(val_str):
+                        amount_str = match.group(1).replace(",", "")
+                        items.append({
+                            "label": "other",
+                            "amount": float(amount_str),
+                            "period": match.group(2) or "",
+                            "context": " | ".join(str(v) for v in row),
+                        })
+            continue
+
+        label_col = label_cols[0] if label_cols else None
+        for _, row in df.iterrows():
+            for pc in price_cols:
+                val_str = str(row[pc])
+                for match in PRICE_PATTERN.finditer(val_str):
+                    amount_str = match.group(1).replace(",", "")
+                    label = str(row[label_col]).strip() if label_col else _classify_line_item(val_str)
+                    items.append({
+                        "label": label,
+                        "amount": float(amount_str),
+                        "period": match.group(2) or "",
+                        "context": " | ".join(str(v) for v in row),
+                    })
+    return items
+
+
 def parse_pricing(text: str, tables: list[pd.DataFrame]) -> dict:
     """Parse pricing details from extracted text and tables."""
-    # TODO: implement pricing extraction logic
-    return {}
+    text_items = _extract_prices_from_text(text)
+    table_items = _extract_prices_from_tables(tables)
+
+    # deduplicate by (amount, context) — prefer table-sourced items
+    seen = set()
+    all_items = []
+    for item in table_items + text_items:
+        key = (item["amount"], item["context"])
+        if key not in seen:
+            seen.add(key)
+            all_items.append(item)
+
+    total = sum(
+        item["amount"] for item in all_items
+        if item["label"] in ("total", "subtotal")
+    )
+    if not total:
+        total = sum(item["amount"] for item in all_items)
+
+    return {
+        "line_items": all_items,
+        "total": total,
+    }
 
 
 def parse_scope(text: str) -> dict:
