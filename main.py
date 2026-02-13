@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import argparse
 import re
 import sys
@@ -17,7 +19,11 @@ def extract_text(pdf_path: str) -> str:
 
 def extract_tables(pdf_path: str) -> list[pd.DataFrame]:
     """Extract tables from a PDF file."""
-    return tabula.read_pdf(pdf_path, pages="all", multiple_tables=True)
+    try:
+        return tabula.read_pdf(pdf_path, pages="all", multiple_tables=True)
+    except Exception as e:
+        print(f"Warning: table extraction failed ({e}). Continuing with text only.", file=sys.stderr)
+        return []
 
 
 PRICE_PATTERN = re.compile(
