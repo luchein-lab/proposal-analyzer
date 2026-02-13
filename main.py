@@ -317,12 +317,180 @@ def parse_scope(text: str) -> dict:
 
 
 BENCHMARKS = {
-    "Marketing Cloud": 10_000,
+    "Marketing Cloud": 15_000,
     "Sales Cloud": 8_000,
     "Service Cloud": 8_000,
     "Commerce Cloud": 15_000,
     "Data Cloud": 12_000,
 }
+
+# Products that are commonly expected in modern Salesforce implementations
+NOTABLE_MISSING_PRODUCTS = {
+    "Agentforce": ["agentforce", "agent force", "autonomous agent"],
+    "Einstein AI": ["einstein ai", "einstein gpt", "predictive ai", "generative ai"],
+    "Shield": ["shield", "platform encryption", "event monitoring", "field audit"],
+    "Revenue Cloud": ["revenue cloud", "billing", "cpq"],
+}
+
+# --- Integration Validation ---
+
+INTEGRATION_PATTERNS = {
+    "system": re.compile(
+        r"(?i)(?:integra\w+|conector\w*|connector|conexi[oó]n|api)\s+"
+        r"(?:con|with|to|a|de|from)?\s*([A-Z][\w\s]{2,30}?)(?:\s*[:\-\(,\.]|$)"
+    ),
+    "api_type": re.compile(
+        r"(?i)(rest\s*api|soap\s*api|graphql|webhook|bulk\s*api|streaming\s*api)", re.IGNORECASE
+    ),
+    "frequency": re.compile(
+        r"(?i)(real[- ]?time|batch\s+\w+|near[- ]?real[- ]?time|diario|daily|hourly|"
+        r"cada\s+\d+\s+\w+|every\s+\d+\s+\w+|streaming|event[- ]?driven)"
+    ),
+    "direction": re.compile(
+        r"(?i)(bi[- ]?direccional|bidirectional|ingesta|ingest|export|push|pull|"
+        r"read|write|sync|unidirectional|unidireccional)"
+    ),
+}
+
+INTEGRATION_READINESS_CHECKS = [
+    ("api_documented", [
+        "api documentada", "documented api", "documentación técnica",
+        "technical documentation", "swagger", "openapi",
+    ]),
+    ("sandbox_access", [
+        "sandbox", "ambiente de prueba", "test environment",
+        "staging", "dev environment", "ambiente de desarrollo",
+    ]),
+    ("auth_defined", [
+        "oauth", "api key", "token", "credenciales", "credentials",
+        "autenticación", "authentication", "llaves de acceso",
+    ]),
+    ("error_handling", [
+        "error handling", "manejo de errores", "retry", "reintento",
+        "fallback", "dead letter", "monitoring", "monitoreo", "alertas",
+    ]),
+    ("data_volume", [
+        "volumen", "volume", "registros", "records", "rows",
+        "filas", "capacidad", "capacity", "límite", "limit",
+    ]),
+]
+
+
+def _extract_integrations(text: str) -> list[dict]:
+    """Extract integration details from proposal text."""
+    normalized = _normalize_pdf_text(text)
+    lower = normalized.lower()
+
+    # Find named systems/platforms being integrated
+    known_systems = {}
+    system_patterns = [
+        (r"(?i)(PMS|property management)", "PMS"),
+        (r"(?i)(lealtad|loyalty|fiesta rewards|rewards)", "Loyalty/Rewards"),
+        (r"(?i)(concierge\s+digital|concierge)", "Concierge Digital"),
+        (r"(?i)(marketing\s+cloud)", "Marketing Cloud"),
+        (r"(?i)(data\s+cloud|data\s+360)", "Data Cloud"),
+        (r"(?i)(mulesoft|anypoint)", "MuleSoft"),
+        (r"(?i)(sitio\s+web|website|web\s+portal)", "Website"),
+        (r"(?i)(erp|sap|oracle|netsuite)", "ERP"),
+        (r"(?i)(flip\.?to|referidos|referral)", "Referral Platform"),
+    ]
+
+    for pattern_str, system_name in system_patterns:
+        if re.search(pattern_str, normalized):
+            known_systems[system_name] = {"mentioned": True}
+
+    # Enrich each system with integration details
+    integrations = []
+    for system_name, info in known_systems.items():
+        # Find the context around this system's mentions
+        system_lower = system_name.lower().split("/")[0]  # use first name
+        contexts = []
+        for line in normalized.splitlines():
+            if system_lower in line.lower():
+                contexts.append(line.strip())
+        full_context = " ".join(contexts)
+        context_lower = full_context.lower()
+
+        # Detect API type
+        api_match = INTEGRATION_PATTERNS["api_type"].search(full_context)
+        api_type = api_match.group(1) if api_match else None
+
+        # Detect frequency
+        freq_match = INTEGRATION_PATTERNS["frequency"].search(full_context)
+        frequency = freq_match.group(1) if freq_match else None
+
+        # Detect direction
+        dir_match = INTEGRATION_PATTERNS["direction"].search(full_context)
+        direction = dir_match.group(1) if dir_match else None
+
+        # Detect limits/caps
+        cap_match = re.search(
+            r"(?i)(?:hasta|up to|limit|cap|máximo|max)\s+(\d+)\s+(entidades|entities|conexi|connect|records|registros)",
+            full_context,
+        )
+        cap = cap_match.group(0) if cap_match else None
+
+        # Check readiness signals
+        readiness = {}
+        for check_name, keywords in INTEGRATION_READINESS_CHECKS:
+            readiness[check_name] = any(kw in context_lower or kw in lower for kw in keywords)
+
+        # Determine if in-scope or out-of-scope
+        exclusion_context = ""
+        for line in normalized.splitlines():
+            if system_lower in line.lower() and any(
+                kw in line.lower() for kw in ["exclu", "fuera", "out of scope", "no incluye", "not included"]
+            ):
+                exclusion_context = line.strip()
+        in_scope = not bool(exclusion_context)
+
+        integrations.append({
+            "system": system_name,
+            "in_scope": in_scope,
+            "exclusion_note": exclusion_context,
+            "api_type": api_type,
+            "frequency": frequency,
+            "direction": direction,
+            "cap": cap,
+            "readiness": readiness,
+        })
+
+    return integrations
+
+
+def _validate_integrations(integrations: list[dict]) -> list[dict]:
+    """Validate each integration and flag risks."""
+    for integ in integrations:
+        risks = []
+        if integ["in_scope"]:
+            if not integ["api_type"]:
+                risks.append("API type not specified (REST, SOAP, etc.)")
+            if not integ["frequency"]:
+                risks.append("Data sync frequency not defined")
+            if not integ["direction"]:
+                risks.append("Data flow direction unclear")
+            readiness = integ["readiness"]
+            if not readiness.get("api_documented"):
+                risks.append("No mention of API documentation")
+            if not readiness.get("sandbox_access"):
+                risks.append("No sandbox/test environment mentioned")
+            if not readiness.get("auth_defined"):
+                risks.append("Authentication method not specified")
+            if not readiness.get("error_handling"):
+                risks.append("No error handling or monitoring strategy")
+        integ["risks"] = risks
+        integ["risk_level"] = (
+            "high" if len(risks) >= 4
+            else "medium" if len(risks) >= 2
+            else "low"
+        )
+    return integrations
+
+
+def parse_integrations(text: str) -> list[dict]:
+    """Extract and validate integrations from proposal text."""
+    integrations = _extract_integrations(text)
+    return _validate_integrations(integrations)
 
 
 def _match_line_items_to_products(
@@ -338,15 +506,15 @@ def _match_line_items_to_products(
     return product_totals
 
 
-def score_proposal(pricing: dict, scope: dict) -> dict:
-    """Score proposal pricing against benchmarks."""
+def score_proposal(pricing: dict, scope: dict, integrations: list[dict]) -> dict:
+    """Score proposal pricing against benchmarks and compute overall score."""
     products = scope.get("products", {})
     line_items = pricing.get("line_items", [])
     total = pricing.get("total", 0)
 
     product_costs = _match_line_items_to_products(line_items, products)
 
-    results = {}
+    product_results = {}
     for product in products:
         benchmark = BENCHMARKS.get(product)
         cost = product_costs.get(product, 0)
@@ -359,32 +527,94 @@ def score_proposal(pricing: dict, scope: dict) -> dict:
                 rating = "fair"
             else:
                 rating = "high"
-            results[product] = {
+            product_results[product] = {
                 "cost": cost,
                 "benchmark": benchmark,
                 "ratio": round(ratio, 2),
                 "rating": rating,
             }
         else:
-            results[product] = {
+            product_results[product] = {
                 "cost": cost,
                 "benchmark": benchmark,
                 "ratio": None,
                 "rating": "unpriced" if not cost else "no_benchmark",
             }
 
-    # overall score: 0-100 based on how many products rate well
-    rated = [r for r in results.values() if r["ratio"] is not None]
-    if rated:
-        avg_ratio = sum(r["ratio"] for r in rated) / len(rated)
-        overall = max(0, min(100, round(100 * (2 - avg_ratio) / 2)))
+    # --- Pricing score (0-10): how competitive is the pricing? ---
+    # Sum individual benchmarks, then apply a bundled-project multiplier (1.5x)
+    # since multi-product implementations have integration overhead, PM, etc.
+    total_benchmark = sum(BENCHMARKS.get(p, 0) for p in products)
+    bundled_benchmark = total_benchmark * 1.5
+    if bundled_benchmark and total:
+        price_ratio = total / bundled_benchmark
+        if price_ratio <= 0.7:
+            pricing_score = 10.0
+            pricing_label = "Very Competitive"
+        elif price_ratio <= 1.0:
+            pricing_score = 8.0
+            pricing_label = "Competitive"
+        elif price_ratio <= 1.3:
+            pricing_score = 6.0
+            pricing_label = "Fair"
+        elif price_ratio <= 1.6:
+            pricing_score = 4.0
+            pricing_label = "Above Market"
+        else:
+            pricing_score = 2.0
+            pricing_label = "Expensive"
     else:
-        overall = 0
+        pricing_score = 5.0
+        pricing_label = "Unverifiable"
+
+    # --- Scope score (0-10): coverage breadth and completeness ---
+    detected_count = len(products)
+    has_in_scope = bool(scope.get("sections", {}).get("in_scope"))
+    has_out_scope = bool(scope.get("sections", {}).get("out_of_scope"))
+
+    scope_score = min(10.0, detected_count * 2.0)
+    if has_in_scope:
+        scope_score = min(10.0, scope_score + 1.0)
+    if has_out_scope:
+        scope_score = min(10.0, scope_score + 1.0)
+
+    # Detect notable missing products
+    normalized_text = _normalize_pdf_text(
+        " ".join(f for feats in products.values() for f in feats)
+        + " " + " ".join(products.keys())
+    ).lower()
+    missing_products = []
+    for product_name, keywords in NOTABLE_MISSING_PRODUCTS.items():
+        if not any(kw in normalized_text for kw in keywords):
+            missing_products.append(product_name)
+
+    # --- Integration score (0-10) ---
+    in_scope_integrations = [i for i in integrations if i["in_scope"]]
+    if in_scope_integrations:
+        risk_scores = {"low": 10, "medium": 6, "high": 3}
+        integ_score = sum(
+            risk_scores.get(i["risk_level"], 5) for i in in_scope_integrations
+        ) / len(in_scope_integrations)
+    else:
+        integ_score = 5.0
+
+    integ_score = round(integ_score, 1)
+
+    # --- Overall score (1-10 scale) ---
+    overall = round(
+        pricing_score * 0.35 + scope_score * 0.35 + integ_score * 0.30, 1
+    )
 
     return {
-        "products": results,
+        "products": product_results,
         "overall_score": overall,
+        "pricing_score": pricing_score,
+        "pricing_label": pricing_label,
+        "scope_score": scope_score,
+        "integration_score": integ_score,
+        "missing_products": missing_products,
         "total_proposed": total,
+        "total_benchmark": total_benchmark,
     }
 
 
@@ -397,8 +627,8 @@ RATING_LABELS = {
 }
 
 
-def _generate_suggestions(scores: dict, scope: dict) -> list[str]:
-    """Generate actionable suggestions based on scores and scope."""
+def _generate_suggestions(scores: dict, scope: dict, integrations: list[dict]) -> list[str]:
+    """Generate actionable suggestions based on scores, scope, and integrations."""
     suggestions = []
     product_scores = scores.get("products", {})
 
@@ -416,6 +646,22 @@ def _generate_suggestions(scores: dict, scope: dict) -> list[str]:
                 f"**{product}** is referenced in scope but has no "
                 f"associated pricing. Request a detailed cost breakdown."
             )
+
+    # Missing products
+    for product_name in scores.get("missing_products", []):
+        suggestions.append(
+            f"**{product_name}** is not included in this proposal. "
+            f"Evaluate whether it should be part of the implementation roadmap."
+        )
+
+    # Integration risks
+    high_risk = [i for i in integrations if i["risk_level"] == "high" and i["in_scope"]]
+    for integ in high_risk:
+        top_risks = ", ".join(integ["risks"][:2])
+        suggestions.append(
+            f"Integration with **{integ['system']}** has high risk: {top_risks}. "
+            f"Address before project kickoff."
+        )
 
     detected = scope.get("products", {})
     for product, features in detected.items():
@@ -443,9 +689,149 @@ def _generate_suggestions(scores: dict, scope: dict) -> list[str]:
     return suggestions
 
 
-def generate_report(pricing: dict, scope: dict, scores: dict) -> str:
+def _generate_exec_summary(pricing: dict, scope: dict, scores: dict, integrations: list[dict]) -> list[str]:
+    """Generate executive summary section."""
+    lines = []
+    lines.append("## Executive Summary")
+    lines.append("")
+
+    overall = scores.get("overall_score", 0)
+    lines.append(f"**Proposal Score: {overall}/10**")
+    lines.append("")
+
+    # Pricing assessment
+    total = pricing.get("total", 0)
+    pricing_label = scores.get("pricing_label", "Unknown")
+    total_benchmark = scores.get("total_benchmark", 0)
+    detected_products = list(scope.get("products", {}).keys())
+
+    benchmark_detail = ""
+    if detected_products and total_benchmark:
+        product_benchmarks = []
+        for p in detected_products:
+            b = BENCHMARKS.get(p)
+            if b:
+                product_benchmarks.append(f"{p} ~${b:,}")
+        if product_benchmarks:
+            benchmark_detail = f" [{', '.join(product_benchmarks)} benchmarks]"
+
+    lines.append(
+        f"**Pricing:** {pricing_label} — ${total:,.0f} USD total"
+        f"{benchmark_detail}"
+    )
+
+    # Scope assessment
+    covered = ", ".join(detected_products) if detected_products else "None detected"
+    missing = scores.get("missing_products", [])
+    missing_str = f" — misses {', '.join(missing)}" if missing else ""
+    lines.append(f"**Scope:** Covers {covered}{missing_str}")
+
+    # Integration health
+    in_scope_integrations = [i for i in integrations if i["in_scope"]]
+    high_risk_count = sum(1 for i in in_scope_integrations if i["risk_level"] == "high")
+    med_risk_count = sum(1 for i in in_scope_integrations if i["risk_level"] == "medium")
+    if in_scope_integrations:
+        integ_summary = f"{len(in_scope_integrations)} integrations"
+        risk_parts = []
+        if high_risk_count:
+            risk_parts.append(f"{high_risk_count} high-risk")
+        if med_risk_count:
+            risk_parts.append(f"{med_risk_count} medium-risk")
+        if risk_parts:
+            integ_summary += f" ({', '.join(risk_parts)})"
+        else:
+            integ_summary += " (all low-risk)"
+    else:
+        integ_summary = "No integrations detected"
+    lines.append(f"**Integrations:** {integ_summary}")
+    lines.append("")
+
+    # Top suggestions (max 3)
+    suggestions = _generate_suggestions(scores, scope, integrations)
+    lines.append("**Key Recommendations:**")
+    for s in suggestions[:3]:
+        lines.append(f"1. {s}")
+    lines.append("")
+
+    return lines
+
+
+def _generate_integration_section(integrations: list[dict]) -> list[str]:
+    """Generate the integration validation section."""
+    lines = []
+    lines.append("## Integration Validation")
+    lines.append("")
+
+    if not integrations:
+        lines.append("_No integrations detected._")
+        lines.append("")
+        return lines
+
+    in_scope = [i for i in integrations if i["in_scope"]]
+    out_scope = [i for i in integrations if not i["in_scope"]]
+
+    if in_scope:
+        lines.append("### In-Scope Integrations")
+        lines.append("")
+        lines.append("| System | API Type | Frequency | Direction | Cap | Risk |")
+        lines.append("|--------|----------|-----------|-----------|-----|------|")
+        for integ in in_scope:
+            api = integ["api_type"] or "—"
+            freq = integ["frequency"] or "—"
+            direction = integ["direction"] or "—"
+            cap = integ["cap"] or "—"
+            risk = integ["risk_level"].upper()
+            lines.append(f"| {integ['system']} | {api} | {freq} | {direction} | {cap} | {risk} |")
+        lines.append("")
+
+        # Detail risks per integration
+        risky = [i for i in in_scope if i["risks"]]
+        if risky:
+            lines.append("### Risk Details")
+            lines.append("")
+            for integ in risky:
+                lines.append(f"**{integ['system']}** ({integ['risk_level']} risk):")
+                for risk in integ["risks"]:
+                    lines.append(f"- {risk}")
+                lines.append("")
+
+        # Readiness checklist
+        lines.append("### Readiness Checklist")
+        lines.append("")
+        check_labels = {
+            "api_documented": "API Documentation",
+            "sandbox_access": "Sandbox/Test Environment",
+            "auth_defined": "Authentication Defined",
+            "error_handling": "Error Handling/Monitoring",
+            "data_volume": "Data Volume/Limits Defined",
+        }
+        lines.append("| Check | " + " | ".join(i["system"] for i in in_scope) + " |")
+        lines.append("|-------| " + " | ".join("---" for _ in in_scope) + " |")
+        for check_key, check_label in check_labels.items():
+            row = f"| {check_label} |"
+            for integ in in_scope:
+                val = integ["readiness"].get(check_key, False)
+                row += f" {'Yes' if val else 'No'} |"
+            lines.append(row)
+        lines.append("")
+
+    if out_scope:
+        lines.append("### Out-of-Scope Integrations")
+        lines.append("")
+        for integ in out_scope:
+            note = integ["exclusion_note"] or "Mentioned but excluded"
+            lines.append(f"- **{integ['system']}**: {note}")
+        lines.append("")
+
+    return lines
+
+
+def generate_report(pricing: dict, scope: dict, scores: dict, integrations: list[dict]) -> str:
     """Generate a Markdown report with analysis and suggestions."""
     lines = ["# Proposal Analysis Report", ""]
+
+    # --- Executive Summary ---
+    lines.extend(_generate_exec_summary(pricing, scope, scores, integrations))
 
     # --- Pricing Summary ---
     lines.append("## Pricing Summary")
@@ -498,11 +884,17 @@ def generate_report(pricing: dict, scope: dict, scores: dict) -> str:
         lines.append(sections["out_of_scope"])
         lines.append("")
 
+    # --- Integration Validation ---
+    lines.extend(_generate_integration_section(integrations))
+
     # --- Benchmark Scoring ---
     lines.append("## Benchmark Scoring")
     lines.append("")
     overall = scores.get("overall_score", 0)
-    lines.append(f"**Overall score:** {overall}/100")
+    pricing_s = scores.get("pricing_score", 0)
+    scope_s = scores.get("scope_score", 0)
+    integ_s = scores.get("integration_score", 0)
+    lines.append(f"**Overall: {overall}/10** (Pricing: {pricing_s}/10 | Scope: {scope_s}/10 | Integrations: {integ_s}/10)")
     lines.append("")
     product_scores = scores.get("products", {})
     if product_scores:
@@ -522,7 +914,7 @@ def generate_report(pricing: dict, scope: dict, scores: dict) -> str:
     # --- Suggestions ---
     lines.append("## Suggestions")
     lines.append("")
-    suggestions = _generate_suggestions(scores, scope)
+    suggestions = _generate_suggestions(scores, scope, integrations)
     for s in suggestions:
         lines.append(f"- {s}")
     lines.append("")
@@ -540,8 +932,9 @@ def analyze(pdf_path: str, output_path: str) -> None:
     tables = extract_tables(pdf_path)
     pricing = parse_pricing(text, tables)
     scope = parse_scope(text)
-    scores = score_proposal(pricing, scope)
-    report = generate_report(pricing, scope, scores)
+    integrations = parse_integrations(text)
+    scores = score_proposal(pricing, scope, integrations)
+    report = generate_report(pricing, scope, scores, integrations)
 
     Path(output_path).write_text(report)
     print(f"Report written to {output_path}")
