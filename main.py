@@ -247,10 +247,67 @@ BENCHMARKS = {
 }
 
 
+def _match_line_items_to_products(
+    line_items: list[dict], products: dict[str, list[str]]
+) -> dict[str, float]:
+    """Map extracted line items to Salesforce products by keyword matching."""
+    product_totals: dict[str, float] = {}
+    for item in line_items:
+        context_lower = item["context"].lower()
+        for product in products:
+            if product.lower() in context_lower:
+                product_totals[product] = product_totals.get(product, 0) + item["amount"]
+    return product_totals
+
+
 def score_proposal(pricing: dict, scope: dict) -> dict:
     """Score proposal pricing against benchmarks."""
-    # TODO: implement scoring logic
-    return {}
+    products = scope.get("products", {})
+    line_items = pricing.get("line_items", [])
+    total = pricing.get("total", 0)
+
+    product_costs = _match_line_items_to_products(line_items, products)
+
+    results = {}
+    for product in products:
+        benchmark = BENCHMARKS.get(product)
+        cost = product_costs.get(product, 0)
+
+        if benchmark and cost:
+            ratio = cost / benchmark
+            if ratio <= 0.8:
+                rating = "good"
+            elif ratio <= 1.2:
+                rating = "fair"
+            else:
+                rating = "high"
+            results[product] = {
+                "cost": cost,
+                "benchmark": benchmark,
+                "ratio": round(ratio, 2),
+                "rating": rating,
+            }
+        else:
+            results[product] = {
+                "cost": cost,
+                "benchmark": benchmark,
+                "ratio": None,
+                "rating": "unpriced" if not cost else "no_benchmark",
+            }
+
+    # overall score: 0-100 based on how many products rate well
+    rated = [r for r in results.values() if r["ratio"] is not None]
+    if rated:
+        avg_ratio = sum(r["ratio"] for r in rated) / len(rated)
+        overall = max(0, min(100, round(100 * (2 - avg_ratio) / 2)))
+    else:
+        overall = 0
+
+    return {
+        "products": results,
+        "overall_score": overall,
+        "total_proposed": total,
+    }
 
 
 def generate_report(pricing: dict, scope: dict, scores: dict) -> str:
