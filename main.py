@@ -30,38 +30,103 @@ PRICE_PATTERN = re.compile(
     r"\$\s?([\d,]+(?:\.\d{2})?)\s*(?:/\s*(mo|month|yr|year|user|license))?"
 )
 
-PRICING_KEYWORDS = [
-    "total", "subtotal", "annual", "monthly", "license", "subscription",
-    "implementation", "setup", "onboarding", "support", "discount",
-    "one-time", "recurring",
+# (label, keywords) — first match wins, so order matters
+PRICING_CATEGORIES = [
+    # Totals
+    ("total", ["total", "subtotal", "gran total"]),
+    # Payment milestones
+    ("milestone", [
+        "anticipo", "advance", "pago final", "final payment",
+        "segundo pago", "second payment", "tercer pago", "third payment",
+        "hito", "milestone", "firma", "signing", "go-live", "kick-off",
+    ]),
+    # Rates
+    ("rate", [
+        "por hora", "per hour", "/hora", "/hour", "blended",
+        "tarifa", "rate", "t&m", "time & material",
+    ]),
+    # Implementation / services
+    ("implementation", [
+        "implementación", "implementacion", "implementation",
+        "servicios", "services", "configuración", "configuracion",
+        "setup", "onboarding", "arranque",
+    ]),
+    # Licensing
+    ("license", [
+        "licencia", "license", "suscripción", "suscripcion",
+        "subscription", "usuario", "user", "seat",
+    ]),
+    # Support
+    ("support", [
+        "soporte", "support", "mantenimiento", "maintenance",
+        "hypercare", "estabilización", "estabilizacion",
+    ]),
+    # Discounts
+    ("discount", [
+        "descuento", "discount", "bonificación", "bonificacion",
+    ]),
+    # Recurring
+    ("recurring", [
+        "mensual", "monthly", "anual", "annual", "yearly",
+        "recurrente", "recurring",
+    ]),
 ]
+
+
+def _normalize_pdf_text(text: str) -> str:
+    """Collapse excessive whitespace from PDF extraction artifacts."""
+    # Replace newlines preceded/followed by a word char with a space
+    # (fixes "Marketing\nCloud" -> "Marketing Cloud")
+    text = re.sub(r"(\w)\s*\n\s*(\w)", r"\1 \2", text)
+    # Collapse runs of spaces (common in PDF text extraction)
+    text = re.sub(r" {2,}", " ", text)
+    # Fix PDF artifact where uppercase letter is separated from rest of word
+    # e.g. "M arketing" -> "Marketing", "D ata" -> "Data"
+    text = re.sub(r"\b([A-Z]) ([a-z])", r"\1\2", text)
+    return text
+
+
+def _get_context_window(lines: list[str], idx: int, window: int = 5) -> str:
+    """Get surrounding non-empty lines as context for a price match."""
+    start = max(0, idx - window)
+    end = min(len(lines), idx + window + 1)
+    context_lines = []
+    for i in range(start, end):
+        stripped = lines[i].strip()
+        if stripped:
+            context_lines.append(stripped)
+    return " ".join(context_lines)
+
+
+def _classify_line_item(text: str) -> str:
+    """Classify a pricing line item based on keyword matching."""
+    lower = text.lower()
+    for label, keywords in PRICING_CATEGORIES:
+        for keyword in keywords:
+            if keyword in lower:
+                return label
+    return "other"
 
 
 def _extract_prices_from_text(text: str) -> list[dict]:
     """Find all dollar amounts in text with surrounding context."""
+    normalized = _normalize_pdf_text(text)
+    lines = normalized.splitlines()
     items = []
-    for line in text.splitlines():
+    for idx, line in enumerate(lines):
         for match in PRICE_PATTERN.finditer(line):
             amount_str = match.group(1).replace(",", "")
             amount = float(amount_str)
             period = match.group(2) or ""
-            label = _classify_line_item(line)
+            context = _get_context_window(lines, idx)
+            label = _classify_line_item(context)
             items.append({
                 "label": label,
                 "amount": amount,
                 "period": period,
-                "context": line.strip(),
+                "context": context,
             })
     return items
-
-
-def _classify_line_item(line: str) -> str:
-    """Classify a pricing line item based on keyword matching."""
-    lower = line.lower()
-    for keyword in PRICING_KEYWORDS:
-        if keyword in lower:
-            return keyword
-    return "other"
 
 
 def _extract_prices_from_tables(tables: list[pd.DataFrame]) -> list[dict]:
@@ -121,12 +186,14 @@ def parse_pricing(text: str, tables: list[pd.DataFrame]) -> dict:
             seen.add(key)
             all_items.append(item)
 
-    total = sum(
-        item["amount"] for item in all_items
-        if item["label"] in ("total", "subtotal")
-    )
-    if not total:
-        total = sum(item["amount"] for item in all_items)
+    # Find the total: use the max "total"-labeled item (usually the grand total),
+    # then fall back to summing "implementation" items, then sum everything.
+    total_items = [item["amount"] for item in all_items if item["label"] == "total"]
+    if total_items:
+        total = max(total_items)
+    else:
+        impl_items = [item["amount"] for item in all_items if item["label"] == "implementation"]
+        total = max(impl_items) if impl_items else sum(item["amount"] for item in all_items)
 
     return {
         "line_items": all_items,
@@ -179,14 +246,15 @@ SALESFORCE_PRODUCTS = {
 }
 
 SCOPE_SECTION_PATTERNS = [
-    re.compile(r"(?i)(?:scope\s+of\s+work|project\s+scope|deliverables|phases?)\s*[:\n]"),
-    re.compile(r"(?i)(?:out\s+of\s+scope|exclusions)\s*[:\n]"),
+    re.compile(r"(?i)(?:scope\s+of\s+work|project\s+scope|deliverables|phases?|alcance)\s*[:\n]"),
+    re.compile(r"(?i)(?:out\s+of\s+scope|exclusions|exclusiones|fuera\s+del?\s+alcance)\s*[:\n]"),
 ]
 
 
 def _detect_products(text: str) -> dict[str, list[str]]:
     """Detect Salesforce products and specific features mentioned."""
-    lower = text.lower()
+    normalized = _normalize_pdf_text(text)
+    lower = normalized.lower()
     detected = {}
     for product, features in SALESFORCE_PRODUCTS.items():
         matched_features = [f for f in features if f in lower]
@@ -197,8 +265,9 @@ def _detect_products(text: str) -> dict[str, list[str]]:
 
 def _extract_scope_sections(text: str) -> dict[str, str]:
     """Extract in-scope and out-of-scope sections from text."""
+    normalized = _normalize_pdf_text(text)
     sections = {}
-    lines = text.splitlines()
+    lines = normalized.splitlines()
     for i, line in enumerate(lines):
         for pattern in SCOPE_SECTION_PATTERNS:
             if pattern.search(line):
@@ -220,14 +289,17 @@ def _extract_scope_sections(text: str) -> dict[str, str]:
 
 def _estimate_user_count(text: str) -> int | None:
     """Try to find user/license count from text."""
+    normalized = _normalize_pdf_text(text)
     patterns = [
-        re.compile(r"(\d+)\s*(?:users?|licenses?|seats?)", re.IGNORECASE),
-        re.compile(r"(?:users?|licenses?|seats?)\s*[:\-]\s*(\d+)", re.IGNORECASE),
+        re.compile(r"(\d+)\s*(?:users?|licenses?|seats?|usuarios?|licencias?)", re.IGNORECASE),
+        re.compile(r"(?:users?|licenses?|seats?|usuarios?|licencias?)\s*[:\-]\s*(\d+)", re.IGNORECASE),
     ]
     for pattern in patterns:
-        match = pattern.search(text)
+        match = pattern.search(normalized)
         if match:
-            return int(match.group(1))
+            count = int(match.group(1))
+            if count >= 2:  # avoid false positives like "1 conexión"
+                return count
     return None
 
 
